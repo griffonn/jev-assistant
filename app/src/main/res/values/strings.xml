@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="uicontrol_description">Lets Jev Assistant read the current screen and tap, type and scroll, only during a task you start: (1) press WhatsApp\'s Send button for a message you just confirmed, and (2) operate an app step by step when you ask it to. It asks you before any tap that looks like sending, paying, buying, booking, posting or deleting, never reads password fields, and always shows a Stop button. The text of screens it operates on is sent to Jev (TypeSafe) to decide each step.</string>
+</resources>

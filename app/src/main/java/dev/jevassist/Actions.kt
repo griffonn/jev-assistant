@@ -11,7 +11,6 @@ import android.os.Build
 import android.provider.AlarmClock
 import android.provider.CalendarContract
 import android.provider.MediaStore
-import android.telephony.SmsManager
 import android.view.KeyEvent
 import java.time.LocalDate
 import java.time.LocalTime
@@ -72,16 +71,27 @@ class Actions(private val activity: Activity, private val prefs: AppPrefs) {
                     Outcome.Done("Opening the dialer for ${cmd.name}.", leave = true)
                 }
             }
-            is Command.Text -> {
+            is Command.WhatsApp -> {
+                val pkg = whatsAppPackage()
                 val body = cmd.body
-                if (body == null) {
-                    openComposer(cmd.number, null)
-                    Outcome.Done("What's the message for ${cmd.name}?", leave = true)
+                if (pkg == null) {
+                    Outcome.Failed("WhatsApp isn't installed.")
+                } else if (body == null) {
+                    openWhatsApp(pkg, cmd.waNumber, null)
+                    Outcome.Done("Opening your chat with ${cmd.name}.", leave = true)
                 } else {
                     Outcome.Confirm(
-                        say = "Send to ${cmd.name}: $body. Send it?",
-                        detail = "To ${cmd.name} (${cmd.number}):\n“$body”",
-                        yes = { sendSms(cmd.number, body, cmd.name) },
+                        say = "WhatsApp ${cmd.name}: $body. Send it?",
+                        detail = "WhatsApp to ${cmd.name}:\n“$body”",
+                        yes = {
+                            val auto = prefs.whatsappAutoSend && JevAccessibilityService.running
+                            if (auto) AutoSend.arm(body)
+                            openWhatsApp(pkg, cmd.waNumber, body)
+                            Outcome.Done(
+                                if (auto) "Sending to ${cmd.name}." else "Tap send in WhatsApp.",
+                                leave = true,
+                            )
+                        },
                     )
                 }
             }
@@ -109,7 +119,8 @@ class Actions(private val activity: Activity, private val prefs: AppPrefs) {
                 repeat(2) { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, AudioManager.FLAG_SHOW_UI) }
                 Outcome.Done(if (cmd.up) "Volume up." else "Volume down.")
             }
-            is Command.Reminder -> addToCalendar(cmd.title, cmd.at, null, 15, alert = 0, isReminder = true)
+            is Command.Reminder ->
+                addToCalendar(cmd.title, cmd.at, null, prefs.reminderEventMinutes, alert = 0, isReminder = true)
             is Command.Event -> addToCalendar(cmd.title, cmd.start, cmd.allDayDate, cmd.minutes, alert = null, isReminder = false)
             is Command.Agenda -> agenda(cmd.date)
             Command.TellTime -> {
@@ -121,41 +132,56 @@ class Actions(private val activity: Activity, private val prefs: AppPrefs) {
                 start(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=" + Uri.encode(cmd.query))))
                 Outcome.Done("Searching the web.", leave = true)
             }
+            is Command.AppTask -> {
+                val svc = JevAccessibilityService.instance
+                val pkg = cmd.appPackage
+                val label = pkg?.let { appLabel(it) } ?: ""
+                if (svc == null) {
+                    Outcome.Failed("Turn on the “Jev Assistant screen control” accessibility service in settings to let me operate apps.")
+                } else if (pkg != null && prefs.isAgentBlocked(pkg, label)) {
+                    Outcome.Failed("You've set $label as off-limits for me.")
+                } else {
+                    svc.startAgent(cmd.goal, pkg)
+                    Outcome.Done(if (pkg != null) "Opening $label…" else "On it.", leave = true)
+                }
+            }
         }
     } catch (e: ActivityNotFoundException) {
         Outcome.Failed("No app on this phone can do that.")
     } catch (e: SecurityException) {
         Outcome.Failed("Android blocked that: a permission is missing. Open Jev Assistant settings.")
+    } catch (e: Exception) {
+        // Show the real error instead of crashing, so problems are easy to report.
+        Outcome.Failed("Something went wrong: ${e.javaClass.simpleName}: ${e.message}")
     }
 
     private fun start(i: Intent) {
         activity.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
-    private fun openComposer(number: String, body: String?) {
-        val i = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + Uri.encode(number)))
-        if (body != null) i.putExtra("sms_body", body)
-        start(i)
+    private fun appLabel(pkg: String): String = try {
+        val pm = activity.packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+    } catch (e: Exception) {
+        pkg
     }
 
-    private fun sendSms(number: String, body: String, name: String): Outcome {
-        if (!activity.granted(Manifest.permission.SEND_SMS)) {
-            openComposer(number, body)
-            return Outcome.Done("Opening Messages so you can send it.", leave = true)
-        }
-        return try {
-            val sms = if (Build.VERSION.SDK_INT >= 31) {
-                activity.getSystemService(SmsManager::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                SmsManager.getDefault()
+    private fun whatsAppPackage(): String? {
+        val pm = activity.packageManager
+        return listOf("com.whatsapp", "com.whatsapp.w4b").firstOrNull {
+            try {
+                pm.getPackageInfo(it, 0); true
+            } catch (e: Exception) {
+                false
             }
-            sms.sendMultipartTextMessage(number, null, sms.divideMessage(body), null, null)
-            Outcome.Done("Sent to $name.")
-        } catch (e: Exception) {
-            openComposer(number, body)
-            Outcome.Done("Couldn't send directly, so I opened Messages.", leave = true)
         }
+    }
+
+    /** WhatsApp's official click-to-chat link, opened directly in the app. */
+    private fun openWhatsApp(pkg: String, waNumber: String, text: String?) {
+        var url = "https://api.whatsapp.com/send?phone=$waNumber"
+        if (text != null) url += "&text=" + Uri.encode(text)
+        start(Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage(pkg))
     }
 
     private fun addToCalendar(
@@ -177,8 +203,9 @@ class Actions(private val activity: Activity, private val prefs: AppPrefs) {
                     else -> describeDay(start!!.toLocalDate()) + " at " + start.format(timeFmt)
                 }
                 return Outcome.Done(
-                    if (isReminder) "Okay, I'll remind you $whenText: $title."
-                    else "Added “$title” $whenText to ${cal.name}."
+                    if (isReminder) "Okay, I'll remind you $whenText: $title. (Saved in ${cal.name})"
+                    else "Added “$title” $whenText to ${cal.name}" +
+                        (if (cal.account.isNotBlank() && cal.account != cal.name) " (${cal.account})." else ".")
                 )
             }
         }

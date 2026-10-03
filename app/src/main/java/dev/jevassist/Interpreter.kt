@@ -2,11 +2,14 @@ package dev.jevassist
 
 import android.content.Context
 import android.provider.ContactsContract.CommonDataKinds.Phone
+import android.telephony.PhoneNumberUtils
+import android.telephony.TelephonyManager
 import android.view.KeyEvent
 import org.json.JSONObject
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZonedDateTime
+import java.util.Locale
 
 /** What the assistant will do. Built in code from Jev's typed answers. */
 sealed class Command {
@@ -15,7 +18,8 @@ sealed class Command {
     data class Alarm(val hour: Int, val minute: Int) : Command()
     object ShowAlarms : Command()
     data class Call(val name: String, val number: String) : Command()
-    data class Text(val name: String, val number: String, val body: String?) : Command()
+    /** waNumber: international digits without "+", as WhatsApp's click-to-chat wants. */
+    data class WhatsApp(val name: String, val waNumber: String, val body: String?) : Command()
     data class PlayMedia(val query: String, val pkg: String?, val appLabel: String?) : Command()
     data class MediaKey(val keyCode: Int, val say: String) : Command()
     data class Volume(val up: Boolean) : Command()
@@ -29,6 +33,8 @@ sealed class Command {
     data class Agenda(val date: LocalDate) : Command()
     object TellTime : Command()
     data class WebSearch(val query: String) : Command()
+    /** Operate an app to accomplish a free-form goal (agent mode). */
+    data class AppTask(val goal: String, val appPackage: String?) : Command()
 }
 
 sealed class Resolution {
@@ -50,6 +56,7 @@ class Analysis(
     val contacts: Map<String, Contact>,
     val spokenNumber: String?,
     val musicApps: Map<String, MediaApp>,
+    val installedApps: Map<String, LaunchApp>,
     val now: ZonedDateTime,
 ) {
     /** Choices the user made by tapping "Did you mean…" buttons override Jev's picks. */
@@ -67,7 +74,7 @@ object Intents {
         "set_alarm" to ("Set an alarm" to "Set an alarm that rings at a clock time, e.g. 'wake me up at 7', 'set an alarm for 6:30'."),
         "show_alarms" to ("Show alarms" to "See, list, cancel, turn off, or manage existing alarms."),
         "call" to ("Call someone" to "Make a phone call to a person or a phone number."),
-        "text" to ("Send a text" to "Send a text message / SMS to a person."),
+        "message" to ("Send a WhatsApp message" to "Send a message to a person: on WhatsApp, a text, or 'message X …', 'tell X that …', 'send X …'."),
         "play_media" to ("Play something" to "Play a specific song, artist, album, playlist, podcast, radio station, or genre."),
         "resume_media" to ("Resume playback" to "Start or resume playback without naming anything, e.g. 'play', 'resume', 'play music', 'continue'."),
         "pause_media" to ("Pause" to "Pause or stop the music, podcast, or video that is playing."),
@@ -80,6 +87,7 @@ object Intents {
         "agenda" to ("Check the calendar" to "Ask what is on the calendar or schedule, e.g. 'what's on my calendar tomorrow', 'do I have meetings today'."),
         "time" to ("Tell the time" to "Ask what time it is or what today's date is."),
         "web_search" to ("Search the web" to "Ask a question or look something up: facts, weather, news, definitions, sports scores."),
+        "app_task" to ("Operate an app" to "Do something inside an app by navigating its screens: change a phone or app setting, or tap through an app to post, like, search, buy, book, or toggle something. E.g. 'turn on battery saver', 'in Instagram like the latest post from NASA', 'set my alarm sound to Beep in Clock settings'."),
         "other" to ("Something else" to "Anything else that is not one of the requests above, including chit-chat or unclear speech."),
     )
 
@@ -116,10 +124,35 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
         val apps = LinkedHashMap<String, MediaApp>()
         MediaApps.list(ctx).take(40).forEachIndexed { i, a -> apps["a$i"] = a }
 
-        val questions = buildQuestions(spans, contacts, number, apps)
+        val installed = LinkedHashMap<String, LaunchApp>()
+        if (prefs.agentEnabled) {
+            launchAppCandidates(utterance).forEachIndexed { i, a -> installed["app$i"] = a }
+        }
+
+        val questions = buildQuestions(spans, contacts, number, apps, installed)
         val state = JSONObject().put("request", utterance)
         val answers = client.ask(state, questions)
-        return Analysis(utterance, answers, spans, contacts, number, apps, ZonedDateTime.now())
+        return Analysis(utterance, answers, spans, contacts, number, apps, installed, ZonedDateTime.now())
+    }
+
+    /** Apps whose name plausibly appears in the command, plus common ones, capped for the 255-option limit. */
+    private fun launchAppCandidates(utterance: String, max: Int = 150): List<LaunchApp> {
+        val all = LaunchableApps.list(ctx)
+        val u = TextTools.normalize(utterance)
+        val uTokens = u.split(" ").filter { it.length >= 2 }.toSet()
+        val scored = all.map { app ->
+            val name = TextTools.normalize(app.label)
+            val score = when {
+                u.contains(name) && name.isNotBlank() -> 3
+                name.split(" ").any { it.length >= 3 && it in uTokens } -> 2
+                else -> 0
+            }
+            app to score
+        }
+        val result = LinkedHashSet<LaunchApp>()
+        scored.filter { it.second > 0 }.sortedByDescending { it.second }.forEach { result.add(it.first) }
+        if (all.size <= max) all.forEach { result.add(it) }
+        return result.take(max)
     }
 
     /** Classifies a spoken reply to "Send it?" as yes / no / unclear. */
@@ -152,20 +185,33 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
         contacts: Map<String, Contact>,
         spokenNumber: String?,
         apps: Map<String, MediaApp>,
+        installed: Map<String, LaunchApp>,
     ): JSONObject {
         val q = JSONObject()
 
+        // Only offer "operate an app" when the user has enabled agent mode.
+        val intentDefs = if (prefs.agentEnabled) Intents.DEFS
+            else Intents.DEFS.filterKeys { it != "app_task" }
         q.put("intent", choice(
             "`request` is a voice command spoken to a phone assistant. What does the user want the assistant to do?",
-            Intents.DEFS.mapValues { it.value.second },
+            intentDefs.mapValues { it.value.second },
         ))
+
+        if (installed.isNotEmpty()) {
+            val crit = LinkedHashMap<String, String?>()
+            installed.forEach { (k, a) -> crit[k] = a.label }
+            crit["none"] = "The request doesn't clearly name one of these apps."
+            q.put("target_app", choice(
+                "If the request is about operating a specific app, which installed app is it?", crit,
+            ))
+        }
 
         // Free text (message body / song / reminder title) as a choice over spans of the sentence.
         val payload = LinkedHashMap<String, String?>()
         spans.forEach { (k, v) -> payload[k] = v }
         payload["none"] = "The request contains no such content."
         q.put("payload", choice(
-            "Which option is exactly the content of the command in `request`: the text message to send, " +
+            "Which option is exactly the content of the command in `request`: the message to send, " +
                 "or the song / artist / album / playlist / podcast to play, or what the reminder or calendar event is about? " +
                 "The option must not include command words (like 'text', 'tell', 'play', 'remind me to', 'add'), " +
                 "the person's name, the app name, or date and time words.",
@@ -274,7 +320,7 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
             "stop_timer" -> Resolution.Run(Command.StopTimer)
             "set_alarm" -> resolveAlarm(a)
             "show_alarms" -> Resolution.Run(Command.ShowAlarms)
-            "call", "text" -> resolveCallOrText(a, intent)
+            "call", "message" -> resolveCallOrMessage(a, intent)
             "play_media" -> {
                 val query = payload(a)
                     ?: return Resolution.Run(Command.MediaKey(KeyEvent.KEYCODE_MEDIA_PLAY, "Playing."))
@@ -308,6 +354,10 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
             }
             "agenda" -> Resolution.Run(Command.Agenda(resolveDate(a) ?: a.now.toLocalDate()))
             "time" -> Resolution.Run(Command.TellTime)
+            "app_task" -> {
+                val appPkg = a.installedApps[a.pick("target_app")]?.pkg
+                Resolution.Run(Command.AppTask(a.utterance, appPkg))
+            }
             "web_search" -> Resolution.Run(Command.WebSearch(a.utterance))
             else -> Resolution.Fail("Sorry, I can't do that yet.", offerSearch = true)
         }
@@ -329,7 +379,7 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
         return a.spans[k]?.takeIf { it.isNotBlank() }
     }
 
-    private fun resolveCallOrText(a: Analysis, intent: String): Resolution {
+    private fun resolveCallOrMessage(a: Analysis, intent: String): Resolution {
         if (a.contacts.isEmpty() && a.spokenNumber == null) {
             return Resolution.Fail(
                 if (!contactsRepo.hasPermission()) "I need the Contacts permission. Open Jev Assistant settings."
@@ -342,6 +392,7 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
 
         val name: String
         val number: String
+        var waNumber: String? = null
         when (val k = a.pick("contact")) {
             null, "none" -> return Resolution.Fail("I couldn't find that person in your contacts.")
             "num" -> {
@@ -354,10 +405,21 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
                 if (nums.isEmpty()) return Resolution.Fail("${c.name} has no phone number.")
                 name = c.name
                 number = pickNumber(nums, a.pick("number_type")).number
+                if (intent == "message") waNumber = contactsRepo.whatsappNumber(c.id)
             }
         }
-        return if (intent == "call") Resolution.Run(Command.Call(name, number))
-        else Resolution.Run(Command.Text(name, number, payload(a)))
+        if (intent == "call") return Resolution.Run(Command.Call(name, number))
+        val wa = waNumber ?: toWhatsAppDigits(number)
+        return Resolution.Run(Command.WhatsApp(name, wa, payload(a)))
+    }
+
+    /** "(312) 555-1234" -> "13125551234" using the SIM's country for numbers without a country code. */
+    private fun toWhatsAppDigits(number: String): String {
+        val tm = ctx.getSystemService(TelephonyManager::class.java)
+        val iso = listOfNotNull(tm?.simCountryIso, tm?.networkCountryIso, Locale.getDefault().country)
+            .firstOrNull { it.isNotBlank() }?.uppercase(Locale.ROOT) ?: "US"
+        val e164 = PhoneNumberUtils.formatNumberToE164(number, iso)
+        return (e164 ?: number).filter { it.isDigit() }
     }
 
     private fun pickNumber(nums: List<PhoneNumber>, type: String?): PhoneNumber {

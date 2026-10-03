@@ -97,9 +97,34 @@ class ContactsRepo(private val ctx: Context) {
         }
         return out.distinctBy { it.number.filter { ch -> ch.isDigit() } }
     }
+
+    /**
+     * WhatsApp adds its own entry to contacts that use WhatsApp, holding the exact WhatsApp ID
+     * ("15551234567@s.whatsapp.net"). Using it avoids guessing the country code.
+     */
+    fun whatsappNumber(contactId: Long): String? {
+        ctx.contentResolver.query(
+            ContactsContract.Data.CONTENT_URI,
+            arrayOf(ContactsContract.Data.DATA1),
+            "${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} IN (?, ?)",
+            arrayOf(
+                contactId.toString(),
+                "vnd.android.cursor.item/vnd.com.whatsapp.profile",
+                "vnd.android.cursor.item/vnd.com.whatsapp.w4b.profile",
+            ),
+            null,
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val jid = c.getString(0) ?: continue
+                val digits = jid.substringBefore('@').filter { it.isDigit() }
+                if (digits.length >= 6) return digits
+            }
+        }
+        return null
+    }
 }
 
-data class CalendarInfo(val id: Long, val name: String)
+data class CalendarInfo(val id: Long, val name: String, val account: String)
 data class AgendaItem(val title: String, val begin: ZonedDateTime, val allDay: Boolean)
 
 class CalendarRepo(private val ctx: Context) {
@@ -107,31 +132,45 @@ class CalendarRepo(private val ctx: Context) {
     fun canRead() = ctx.granted(Manifest.permission.READ_CALENDAR)
     fun canWrite() = ctx.granted(Manifest.permission.WRITE_CALENDAR) && canRead()
 
-    /** The primary visible calendar you can write to (usually your Google account's). */
+    /**
+     * The calendar new reminders/events go to. Prefers your Google account's own calendar
+     * (so it syncs and Google Calendar notifies you), over phone-only or shared calendars.
+     */
     fun writableCalendar(): CalendarInfo? {
         if (!canWrite()) return null
-        var fallback: CalendarInfo? = null
+        var best: CalendarInfo? = null
+        var bestScore = -1
         ctx.contentResolver.query(
             CalendarContract.Calendars.CONTENT_URI,
             arrayOf(
                 CalendarContract.Calendars._ID,
                 CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
-                CalendarContract.Calendars.IS_PRIMARY,
                 CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL,
                 CalendarContract.Calendars.VISIBLE,
+                CalendarContract.Calendars.ACCOUNT_NAME,
+                CalendarContract.Calendars.ACCOUNT_TYPE,
+                CalendarContract.Calendars.OWNER_ACCOUNT,
             ),
             null, null, null,
         )?.use { c ->
             while (c.moveToNext()) {
-                val access = c.getInt(3)
-                val visible = c.getInt(4) == 1
-                if (access < CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR || !visible) continue
-                val info = CalendarInfo(c.getLong(0), c.getString(1) ?: "Calendar")
-                if (c.getInt(2) == 1) return info
-                if (fallback == null) fallback = info
+                val access = c.getInt(2)
+                if (access < CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR) continue
+                val account = c.getString(4) ?: ""
+                val type = c.getString(5) ?: ""
+                val owner = c.getString(6) ?: ""
+                var score = 0
+                if (c.getInt(3) == 1) score += 1                 // visible
+                if (type == "com.google") score += 4              // syncs with Google Calendar
+                if (owner.isNotEmpty() && owner == account) score += 2  // your own calendar, not a shared one
+                if (access >= CalendarContract.Calendars.CAL_ACCESS_OWNER) score += 1
+                if (score > bestScore) {
+                    bestScore = score
+                    best = CalendarInfo(c.getLong(0), c.getString(1) ?: "Calendar", account)
+                }
             }
         }
-        return fallback
+        return best
     }
 
     /** Inserts an event directly. Returns null if it couldn't (caller falls back to the calendar app). */
@@ -204,6 +243,22 @@ class CalendarRepo(private val ctx: Context) {
 }
 
 data class MediaApp(val pkg: String, val label: String)
+
+data class LaunchApp(val pkg: String, val label: String)
+
+object LaunchableApps {
+    /** User-launchable apps, for "open X and …" tasks. */
+    @Suppress("DEPRECATION")
+    fun list(ctx: Context): List<LaunchApp> {
+        val pm = ctx.packageManager
+        val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        return pm.queryIntentActivities(main, 0)
+            .map { LaunchApp(it.activityInfo.packageName, it.loadLabel(pm).toString()) }
+            .filter { it.pkg != ctx.packageName }
+            .distinctBy { it.pkg }
+            .sortedBy { it.label.lowercase() }
+    }
+}
 
 object MediaApps {
     /** Installed apps that can "play X" from a search query (Spotify, YouTube Music, ...). */

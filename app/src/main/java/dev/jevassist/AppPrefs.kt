@@ -50,6 +50,51 @@ class AppPrefs(context: Context) {
         get() = prefs.getString("music_pkg", null)
         set(v) = prefs.edit().putString("music_pkg", v).apply()
 
+    /** "Hey Jev" background listening is switched on. */
+    var wakeEnabled: Boolean
+        get() = prefs.getBoolean("wake_enabled", false)
+        set(v) = prefs.edit().putBoolean("wake_enabled", v).apply()
+
+    /**
+     * The phrase the offline recognizer listens for. It must be ordinary English words the
+     * speech model knows; "jev" isn't one, so the default is "hey jeff", which sounds the same.
+     */
+    var wakePhrase: String
+        get() = prefs.getString("wake_phrase", DEFAULT_WAKE) ?: DEFAULT_WAKE
+        set(v) = prefs.edit().putString("wake_phrase",
+            TextTools.normalize(v).ifBlank { DEFAULT_WAKE }).apply()
+
+    /** Tap WhatsApp's Send button automatically after you confirm (needs the accessibility service). */
+    var whatsappAutoSend: Boolean
+        get() = prefs.getBoolean("wa_autosend", true)
+        set(v) = prefs.edit().putBoolean("wa_autosend", v).apply()
+
+    /** Agent mode: let Jev operate arbitrary apps by reading the screen and tapping. Off by default. */
+    var agentEnabled: Boolean
+        get() = prefs.getBoolean("agent_enabled", false)
+        set(v) = prefs.edit().putBoolean("agent_enabled", v).apply()
+
+    /** Ask before every tap/typing (handy while trying it out). Risky taps always ask regardless. */
+    var agentConfirmEveryStep: Boolean
+        get() = prefs.getBoolean("agent_confirm_all", false)
+        set(v) = prefs.edit().putBoolean("agent_confirm_all", v).apply()
+
+    /** Comma-separated app names the agent must never operate (e.g. banking apps). */
+    var agentBlocklist: String
+        get() = prefs.getString("agent_block", "") ?: ""
+        set(v) = prefs.edit().putString("agent_block", v.trim()).apply()
+
+    fun isAgentBlocked(pkg: String, label: String): Boolean {
+        val l = label.lowercase()
+        return agentBlocklist.split(',').map { it.trim().lowercase() }.filter { it.length >= 2 }
+            .any { it == pkg.lowercase() || l.contains(it) }
+    }
+
+    /** Length of a reminder's calendar event. */
+    var reminderEventMinutes: Int
+        get() = prefs.getInt("rem_minutes", 5)
+        set(v) = prefs.edit().putInt("rem_minutes", v.coerceIn(1, 120)).apply()
+
     private fun secretKey(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
@@ -85,5 +130,6 @@ class AppPrefs(context: Context) {
     companion object {
         private const val ALIAS = "jevassist_api_key"
         private const val KEY_API = "api_key_enc"
+        const val DEFAULT_WAKE = "hey jeff"
     }
 }

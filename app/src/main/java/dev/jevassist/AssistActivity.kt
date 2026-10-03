@@ -69,6 +69,7 @@ class AssistActivity : Activity() {
         prefs = AppPrefs(this)
         interpreter = Interpreter(this, prefs)
         actions = Actions(this, prefs)
+        WakeWordService.instance?.pause() // free the microphone for the recognizer
         buildUi()
         tts = TextToSpeech(this) { st ->
             ttsReady = st == TextToSpeech.SUCCESS
@@ -84,6 +85,7 @@ class AssistActivity : Activity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        WakeWordService.instance?.pause()
         begin()
     }
 
@@ -100,6 +102,7 @@ class AssistActivity : Activity() {
         tts?.shutdown()
         worker.shutdownNow()
         main.removeCallbacksAndMessages(null)
+        WakeWordService.instance?.resume() // listen for "Hey Jev" again
         super.onDestroy()
     }
 
@@ -119,7 +122,14 @@ class AssistActivity : Activity() {
             addButton("Open settings") { openSettings() }
             return
         }
-        startListening()
+        if (WakeWordService.instance != null) {
+            // Give the wake-word listener a moment to release the microphone.
+            status.text = "…"
+            val gen = generation
+            main.postDelayed({ if (gen == generation) startListening() }, 300)
+        } else {
+            startListening()
+        }
     }
 
     private fun handleUtterance(text: String) {
@@ -504,6 +514,7 @@ class AssistActivity : Activity() {
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).roundToInt()
 
     companion object {
+        const val EXTRA_FROM_WAKE = "from_wake"
         private const val AFTER_NONE = 0
         private const val AFTER_LISTEN = 1
         private const val AFTER_CLOSE = 2

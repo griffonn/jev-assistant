@@ -44,4 +44,9 @@ android {
         jvmTarget = "17"
     }
 }
-// No third-party dependencies: networking, JSON, speech and TTS all come from Android itself.
+dependencies {
+    // Offline speech recognizer used only for the "Hey Jev" wake phrase.
+    // "@aar" = take exactly these artifacts (the JNA aar carries the native bits Vosk needs).
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
+}
