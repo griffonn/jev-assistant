@@ -515,6 +515,7 @@ class AssistActivity : Activity() {
 
     companion object {
         const val EXTRA_FROM_WAKE = "from_wake"
+        const val EXTRA_FROM_WIDGET = "from_widget"
         private const val AFTER_NONE = 0
         private const val AFTER_LISTEN = 1
         private const val AFTER_CLOSE = 2

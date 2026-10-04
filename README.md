@@ -43,6 +43,12 @@ Every later push builds a new version that installs over the old one, keeping yo
 3. Tap **Grant permissions**. Grant only what you want to use.
 4. Tap **Open default apps settings → Digital assistant app → Jev Assistant**.
 
+## Home-screen widget
+
+Long-press your home screen → **Widgets** → **Jev** → drag the round mic onto the home screen.
+Tapping it opens the assistant already listening. It's the battery-free alternative to "Hey Jev",
+which you can leave off (settings section 5).
+
 ## "Hey Jev" from any screen
 
 Settings → section 5:
@@ -120,6 +126,7 @@ app/src/main/java/dev/jevassist/
   MainActivity.kt    settings screen
   WakeWordService.kt "Hey Jev" offline listener (Vosk) + model download
   BootReceiver.kt    "turn Hey Jev back on" notification after reboot
+  AssistWidget.kt    home-screen mic widget
   JevAccessibilityService.kt  screen control: agent overlay (status, questions, Stop) + WhatsApp send
   ScreenAgent.kt     reads the screen as text, one Jev call per step, performs the action
 ```

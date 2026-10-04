@@ -74,6 +74,19 @@
             </intent-filter>
         </activity>
 
+        <!-- Home-screen widget: tap the mic to open the assistant -->
+        <receiver
+            android:name=".AssistWidget"
+            android:exported="false"
+            android:label="Jev">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info" />
+        </receiver>
+
         <!-- Offline wake-word listener -->
         <service
             android:name=".WakeWordService"
