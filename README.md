@@ -103,6 +103,19 @@ Games and apps that draw their own UI without accessibility labels are mostly in
 in your Google account's calendar. The length is adjustable in settings section 8.
 Without a time, your calendar app opens with the title filled in so you can pick one.
 
+## Replies and logs
+
+The reply appears in the assistant panel (and is spoken), and the panel stays open until you tap outside it.
+To have it close by itself, use the switch in settings section 4. When a command opens another app
+(call, WhatsApp, music, agent), the reply shows briefly at the bottom of the screen instead.
+
+**Logs:** the clock button in the assistant panel, or settings → View logs. Every interaction is recorded:
+what you said, each Jev request and response in full (questions, options, picks, confidence, probabilities,
+latency, tokens), what the app decided, and what it replied. Agent runs include every step and the screen text
+Jev saw. Tap an entry for a readable timeline, with **Raw JSON**, **Copy** and **Share** options.
+**Export** saves all logs to Downloads. Logs stay on the phone (about 8 MB max, oldest dropped first) and can be
+turned off in settings.
+
 ## Tuning
 
 - **Confidence threshold** (settings): raise it if it acts on wrong guesses; lower it if it asks too often.
@@ -127,6 +140,8 @@ app/src/main/java/dev/jevassist/
   WakeWordService.kt "Hey Jev" offline listener (Vosk) + model download
   BootReceiver.kt    "turn Hey Jev back on" notification after reboot
   AssistWidget.kt    home-screen mic widget
+  JevLog.kt          on-device interaction log (JSON lines)
+  LogActivity.kt     log viewer: timeline, raw JSON, copy/share, export
   JevAccessibilityService.kt  screen control: agent overlay (status, questions, Stop) + WhatsApp send
   ScreenAgent.kt     reads the screen as text, one Jev call per step, performs the action
 ```

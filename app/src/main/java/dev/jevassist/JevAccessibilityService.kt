@@ -132,7 +132,7 @@ class JevAccessibilityService : AccessibilityService() {
                 if (overlay == null) showOverlay()
                 statusView?.text = text
                 setButtons(emptyList())
-                main.postDelayed({ if (agent == null) removeOverlay() }, 4000)
+                main.postDelayed({ if (agent == null) removeOverlay() }, 8000)
             }
         }
 

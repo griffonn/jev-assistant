@@ -95,6 +95,16 @@ class AppPrefs(context: Context) {
         get() = prefs.getInt("rem_minutes", 5)
         set(v) = prefs.edit().putInt("rem_minutes", v.coerceIn(1, 120)).apply()
 
+    /** Keep the on-device interaction log (Settings → View logs). */
+    var keepLogs: Boolean
+        get() = prefs.getBoolean("keep_logs", true)
+        set(v) = prefs.edit().putBoolean("keep_logs", v).apply()
+
+    /** Close the assistant panel by itself after answering (otherwise it stays until you tap outside). */
+    var autoClose: Boolean
+        get() = prefs.getBoolean("auto_close", false)
+        set(v) = prefs.edit().putBoolean("auto_close", v).apply()
+
     private fun secretKey(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }

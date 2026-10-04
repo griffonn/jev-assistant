@@ -55,6 +55,7 @@ class AssistActivity : Activity() {
     private var currentAnalysis: Analysis? = null
     private var pendingConfirm: Outcome.Confirm? = null
     private var autoClose: Runnable? = null
+    private var rec: LogRecord? = null
 
     private lateinit var status: TextView
     private lateinit var transcript: TextView
@@ -96,6 +97,7 @@ class AssistActivity : Activity() {
     }
 
     override fun onDestroy() {
+        rec?.writeOnce(applicationContext)
         recognizer?.destroy()
         recognizer = null
         tts?.stop()
@@ -109,6 +111,8 @@ class AssistActivity : Activity() {
     // ------------------------------------------------------------------ flow
 
     private fun begin() {
+        rec?.writeOnce(applicationContext)
+        rec = null
         cancelAutoClose()
         generation++
         pendingConfirm = null
@@ -146,11 +150,14 @@ class AssistActivity : Activity() {
         val confirm = pendingConfirm
         if (confirm != null) {
             pendingConfirm = null
+            rec?.event("you said", said)
             worker.execute {
                 val answer = try { interpreter.classifyReply(confirm.say, said) } catch (e: Exception) { "unclear" }
                 main.post {
                     if (gen != generation) return@post
                     status.text = ""
+                    interpreter.lastAnswers?.let { rec?.jev("confirm", it) }
+                    rec?.event("decided", "Your reply means: $answer")
                     when (answer) {
                         "yes" -> show(confirm.yes())
                         "no" -> finishWith("Okay, I won't send it.")
@@ -161,12 +168,21 @@ class AssistActivity : Activity() {
             return
         }
 
+        rec?.writeOnce(applicationContext)
+        val record = LogRecord("command", said).also { it.event("you said", said) }
+        rec = record
         val t0 = SystemClock.elapsedRealtime()
         worker.execute {
             try {
                 val a = interpreter.analyze(said)
+                record.jev("command", a.answers)
+                a.answers.choice("intent")?.let {
+                    record.put("intent", it.choice).put("intent_confidence", it.confidence)
+                }
                 val r = interpreter.resolve(a)
+                record.event("decided", describe(r))
                 val total = SystemClock.elapsedRealtime() - t0
+                record.put("total_ms", total)
                 main.post {
                     if (gen != generation) return@post
                     currentAnalysis = a
@@ -174,6 +190,7 @@ class AssistActivity : Activity() {
                     handleResolution(r)
                 }
             } catch (e: Exception) {
+                record.event("error", e.message ?: e.toString())
                 main.post { if (gen == generation) fail(e.message ?: e.toString()) }
             }
         }
@@ -184,6 +201,7 @@ class AssistActivity : Activity() {
         when (r) {
             is Resolution.Run -> show(actions.run(r.command))
             is Resolution.Clarify -> {
+                rec?.event("asked you", r.prompt + " " + r.options.joinToString(" / ") { it.second })
                 reply.text = r.prompt
                 r.options.forEach { (key, label) -> addButton(label) { choose(r.questionId, key) } }
                 addButton("Cancel") { finish() }
@@ -203,6 +221,7 @@ class AssistActivity : Activity() {
     private fun choose(questionId: String, key: String) {
         val a = currentAnalysis ?: return
         a.overrides[questionId] = key
+        rec?.event("you chose", "$questionId = $key")
         clearButtons()
         status.text = "…"
         val gen = ++generation
@@ -217,14 +236,18 @@ class AssistActivity : Activity() {
         when (o) {
             is Outcome.Done -> {
                 reply.text = o.say
+                rec?.event("replied", o.say)
+                rec?.put("result", o.say)
                 if (o.leave) {
-                    Toast.makeText(applicationContext, o.say, Toast.LENGTH_SHORT).show()
+                    // Another app is opening: show the reply briefly; it's also in the log.
+                    Toast.makeText(applicationContext, o.say, Toast.LENGTH_LONG).show()
                     finish()
                 } else {
-                    speak(o.say, then = AFTER_CLOSE)
+                    speak(o.say, then = if (prefs.autoClose) AFTER_CLOSE else AFTER_NONE)
                 }
             }
             is Outcome.Confirm -> {
+                rec?.event("asked you", o.say)
                 pendingConfirm = o
                 reply.text = o.detail
                 addButton("Send") {
@@ -240,6 +263,8 @@ class AssistActivity : Activity() {
     }
 
     private fun fail(message: String) {
+        rec?.event("replied", message)
+        rec?.put("result", message)
         status.text = ""
         reply.text = message
         speak(message)
@@ -247,8 +272,21 @@ class AssistActivity : Activity() {
     }
 
     private fun finishWith(message: String) {
+        rec?.event("replied", message)
+        rec?.put("result", message)
         reply.text = message
-        speak(message, then = AFTER_CLOSE)
+        speak(message, then = if (prefs.autoClose) AFTER_CLOSE else AFTER_NONE)
+    }
+
+    private fun describe(r: Resolution): String = when (r) {
+        is Resolution.Run -> "Run ${r.command}"
+        is Resolution.Clarify -> "Ask: ${r.prompt} ${r.options.joinToString(" / ") { it.second }}"
+        is Resolution.Fail -> "Can't: ${r.message}"
+    }
+
+    private fun openLogs() {
+        startActivity(Intent(this, LogActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        finish()
     }
 
     private fun openSettings() {
@@ -481,6 +519,14 @@ class AssistActivity : Activity() {
                 }
             }
         }
+        val logsBtn = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_recent_history)
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(chip) }
+            alpha = 0.8f
+            contentDescription = "Logs"
+            setOnClickListener { openLogs() }
+        }
+        row.addView(logsBtn, LinearLayout.LayoutParams(dp(40), dp(40)).apply { rightMargin = dp(8) })
         row.addView(input, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         row.addView(mic, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(10) })
 

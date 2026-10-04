@@ -23,6 +23,9 @@ class JevAnswers(
     val model: String,
     val inputTokens: Int,
     val latencyMs: Long,
+    /** Exact JSON sent and received (no API key: that's only in the HTTP header). For the log. */
+    val rawRequest: String = "",
+    val rawResponse: String = "",
 ) {
     fun choice(id: String): ChoiceAnswer? {
         val a = answers.optJSONObject(id) ?: return null
@@ -52,12 +55,12 @@ class JevAnswers(
 class JevClient(private val apiKey: String, private val model: String) {
 
     fun ask(state: Any, questions: JSONObject): JevAnswers {
-        val body = JSONObject()
+        val bodyText = JSONObject()
             .put("state", state)
             .put("model", model)
             .put("questions", questions)
             .toString()
-            .toByteArray(Charsets.UTF_8)
+        val body = bodyText.toByteArray(Charsets.UTF_8)
 
         var attempt = 0
         while (true) {
@@ -85,6 +88,8 @@ class JevClient(private val apiKey: String, private val model: String) {
                         model = json.optString("model"),
                         inputTokens = json.optJSONObject("usage")?.optInt("input_tokens") ?: 0,
                         latencyMs = latency,
+                        rawRequest = bodyText,
+                        rawResponse = text,
                     )
                 }
                 // 429 = rate limited, 529 = overloaded: retry with backoff (as TypeSafe recommends).

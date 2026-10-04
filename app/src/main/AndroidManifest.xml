@@ -54,6 +54,12 @@
             </intent-filter>
         </activity>
 
+        <!-- Interaction log viewer -->
+        <activity
+            android:name=".LogActivity"
+            android:exported="false"
+            android:label="Jev logs" />
+
         <!-- The assistant overlay. Handling ACTION_ASSIST is what lets Android offer this app
              under Settings > Default apps > Digital assistant app. -->
         <activity

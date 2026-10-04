@@ -132,6 +132,7 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
         val questions = buildQuestions(spans, contacts, number, apps, installed)
         val state = JSONObject().put("request", utterance)
         val answers = client.ask(state, questions)
+        lastAnswers = answers
         return Analysis(utterance, answers, spans, contacts, number, apps, installed, ZonedDateTime.now())
     }
 
@@ -156,6 +157,9 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
     }
 
     /** Classifies a spoken reply to "Send it?" as yes / no / unclear. */
+    /** The most recent Jev call's full answers (for the log). */
+    @Volatile var lastAnswers: JevAnswers? = null
+
     fun classifyReply(prompt: String, reply: String): String {
         val key = prefs.apiKey ?: throw JevException("No Jev API key.")
         val q = JSONObject().put(
@@ -170,7 +174,9 @@ class Interpreter(private val ctx: Context, private val prefs: AppPrefs) {
             ),
         )
         val state = JSONObject().put("assistant_asked", prompt).put("reply", reply)
-        val ans = JevClient(key, prefs.model).ask(state, q).choice("confirm")
+        val all = JevClient(key, prefs.model).ask(state, q)
+        lastAnswers = all
+        val ans = all.choice("confirm")
         return if (ans == null || ans.confidence < prefs.confidenceThreshold) "unclear" else ans.choice
     }
 

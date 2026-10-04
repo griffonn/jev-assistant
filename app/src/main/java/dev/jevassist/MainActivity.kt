@@ -113,6 +113,17 @@ class MainActivity : Activity() {
             isChecked = prefs.showDebug
             setOnCheckedChangeListener { _, v -> prefs.showDebug = v }
         })
+        col.addView(Switch(this).apply {
+            text = "Close the assistant by itself after answering"
+            isChecked = prefs.autoClose
+            setOnCheckedChangeListener { _, v -> prefs.autoClose = v }
+        })
+        col.addView(Switch(this).apply {
+            text = "Keep a log of everything (on this phone only)"
+            isChecked = prefs.keepLogs
+            setOnCheckedChangeListener { _, v -> prefs.keepLogs = v }
+        })
+        col.addView(button("View logs") { startActivity(Intent(this, LogActivity::class.java)) })
         val thrLabel = text("", 14f)
         fun showThr() {
             thrLabel.text = "Ask “Did you mean…?” when Jev's confidence is below " +

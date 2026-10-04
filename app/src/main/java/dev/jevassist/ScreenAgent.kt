@@ -199,16 +199,50 @@ interface AgentUi {
 class ScreenAgent(
     private val svc: AccessibilityService,
     private val prefs: AppPrefs,
-    private val ui: AgentUi,
+    private val baseUi: AgentUi,
     private val lastEventAt: () -> Long,
 ) {
     @Volatile var cancelled = false
+    private var rec = LogRecord("agent", "")
+    private var ui: AgentUi = baseUi
 
     fun run(goal: String, pkg: String?) {
+        rec = LogRecord("agent", goal).put("app_package", pkg)
+        ui = LoggingUi(baseUi, rec)
         try {
             loop(goal, pkg, pkg?.let { appLabelOf(it) })
+            if (cancelled) rec.event("stopped", "You pressed Stop")
         } catch (e: Exception) {
+            rec.event("error", e.toString())
             ui.finish("Stopped: ${e.message ?: e.javaClass.simpleName}")
+        } finally {
+            rec.writeOnce(svc.applicationContext)
+        }
+    }
+
+    /** Records everything the agent shows or asks, then passes it on to the real overlay. */
+    private class LoggingUi(private val inner: AgentUi, private val rec: LogRecord) : AgentUi {
+        override fun status(text: String) {
+            rec.event("status", text)
+            inner.status(text)
+        }
+
+        override fun confirm(question: String): Boolean {
+            val ok = inner.confirm(question)
+            rec.event("asked you", "$question → ${if (ok) "yes" else "no"}")
+            return ok
+        }
+
+        override fun askChoice(question: String, options: List<Pair<String, String>>): String? {
+            val pick = inner.askChoice(question, options)
+            rec.event("asked you", "$question ${options.joinToString(" / ") { it.second }} → ${pick ?: "stop"}")
+            return pick
+        }
+
+        override fun finish(text: String) {
+            rec.event("finished", text)
+            rec.put("result", text)
+            inner.finish(text)
         }
     }
 
@@ -258,6 +292,7 @@ class ScreenAgent(
                 .put("steps_done", JSONArray(history))
                 .put("screen_text", JSONArray(snap.texts.take(70)))
             val answers = client.ask(state, questions)
+            rec.jev("step $step", answers)
             if (cancelled) return
             val action = answers.choice("action") ?: return ui.finish("Jev didn't answer.")
 
@@ -270,6 +305,15 @@ class ScreenAgent(
                 }
             }
 
+            rec.event(
+                "step $step",
+                "${labels[choice] ?: choice} (p=${"%.2f".format(action.probabilities[choice] ?: 0.0)})",
+                JSONObject()
+                    .put("app", snap.pkg)
+                    .put("elements", snap.elements.size)
+                    .put("looked_not_ready", snap.looksNotReady)
+                    .put("screen_text", JSONArray(snap.texts)),
+            )
             when (choice) {
                 "done" -> return ui.finish("Done.")
                 "wait" -> {
