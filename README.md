@@ -93,6 +93,13 @@ Safeguards:
 - **Blocked apps:** list apps it must never operate (e.g. banking). The text of screens it operates on goes to TypeSafe's servers.
 - **"Ask before every tap"** is an optional switch for when you're first trying it.
 - **It stops on its own** if the screen stops changing or after 15 steps.
+- **Sign-in and verification stay yours.** For a fingerprint, face or PIN prompt, a locked phone, a password field, or a
+  sign-in/CAPTCHA/"approve on another device" step (which Jev can flag), it pauses and says "Your turn".
+  It continues on its own once the prompt is gone, or when you tap **Continue**. It never types passwords.
+
+Loading: the agent waits while a screen is blank, and briefly (up to 4 s) if it shows a "Loading…" message or a spinner
+on an almost empty screen. Then Jev judges, and may choose "wait" up to twice.
+Sparse screens such as maps or players are treated as ready.
 
 Limits: short, concrete goals work best, because TypeSafe notes Jev is weaker at multi-step reasoning.
 Games and apps that draw their own UI without accessibility labels are mostly invisible to it.

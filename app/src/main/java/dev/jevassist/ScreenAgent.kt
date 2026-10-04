@@ -2,6 +2,7 @@ package dev.jevassist
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.KeyguardManager
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
@@ -29,22 +30,32 @@ class ScreenSnapshot(
     val signature: Int,
     /** A spinner / progress bar / skeleton loader is visible. */
     val progressVisible: Boolean,
+    /** A password/PIN field is on screen: only you should fill it. */
+    val passwordField: Boolean,
 ) {
     private val loadingText = Regex(
         "^(loading|please wait|connecting|just a moment|one moment|signing in|refreshing)\\b",
         RegexOption.IGNORE_CASE,
     )
 
-    /** Heuristic: the app hasn't shown real content yet (blank, splash, or spinner with little else). */
-    val looksNotReady: Boolean
+    /** Nothing at all on screen yet. */
+    val isBlank: Boolean get() = elements.isEmpty() && texts.isEmpty()
+
+    /**
+     * Probably still loading: a "Loading…"-type message with few controls, or a spinner on an
+     * almost empty screen. Deliberately narrow: map, video and player screens are sparse and
+     * show progress bars too, but they are ready.
+     */
+    val looksLoading: Boolean
         get() {
-            if (elements.isEmpty()) return true
-            if (elements.size + texts.size < 3) return true
-            val few = elements.size <= 6
-            if (few && progressVisible) return true
-            if (few && texts.any { loadingText.containsMatchIn(it) }) return true
+            val total = elements.size + texts.size
+            if (total < 2) return true
+            if (elements.size <= 6 && texts.any { loadingText.containsMatchIn(it) }) return true
+            if (progressVisible && total < 4) return true
             return false
         }
+
+    val looksNotReady: Boolean get() = isBlank || looksLoading
 }
 
 /**
@@ -64,6 +75,7 @@ object ScreenReader {
         var focusedInput: AccessibilityNodeInfo? = null
         var filledInput: AccessibilityNodeInfo? = null
         var progress = false
+        var password = false
 
         fun visit(n: AccessibilityNodeInfo, depth: Int) {
             if (depth > 45 || !n.isVisibleToUser) return
@@ -79,6 +91,7 @@ object ScreenReader {
                 val area = r.width() * r.height()
                 if (area > scrollArea) { scrollArea = area; scroll = n }
             }
+            if (n.isPassword) password = true
             if (n.isEditable && !n.isPassword) {
                 if (n.isFocused) focusedInput = n
                 if (!n.text.isNullOrBlank()) filledInput = n
@@ -104,6 +117,7 @@ object ScreenReader {
             inputForSubmit = focusedInput ?: filledInput,
             signature = (textList.joinToString("|") + elements.size).hashCode(),
             progressVisible = progress,
+            passwordField = password,
         )
     }
 
@@ -189,6 +203,11 @@ interface AgentUi {
     fun confirm(question: String): Boolean
     fun askChoice(question: String, options: List<Pair<String, String>>): String?
     fun finish(text: String)
+    /**
+     * Your turn (sign in, fingerprint…): shows [message] with Continue/Stop and blocks until you tap
+     * one, or [isDone] reports true twice in a row (half a second apart). Returns false to stop.
+     */
+    fun waitForUser(message: String, isDone: () -> Boolean): Boolean
 }
 
 /**
@@ -244,6 +263,13 @@ class ScreenAgent(
             rec.put("result", text)
             inner.finish(text)
         }
+
+        override fun waitForUser(message: String, isDone: () -> Boolean): Boolean {
+            rec.event("your turn", message)
+            val ok = inner.waitForUser(message, isDone)
+            rec.event("your turn", if (ok) "Continuing" else "Stopped")
+            return ok
+        }
     }
 
     private fun loop(goal: String, pkg: String?, appLabel: String?) {
@@ -275,7 +301,23 @@ class ScreenAgent(
         while (step < MAX_STEPS) {
             if (cancelled) return
             waitForSettle()
+            // Fingerprint / face / PIN prompt or a locked phone: that's yours to do.
+            if (authPromptVisible()) {
+                if (!ui.waitForUser(AUTH_MESSAGE) { !authPromptVisible() }) return ui.finish("Okay, stopped.")
+                ui.status("Thanks, continuing…")
+                continue
+            }
             val snap = waitUntilReady() ?: return
+            if (snap.passwordField) {
+                val sig = snap.signature
+                val done = {
+                    val now = svc.rootInActiveWindow?.let { ScreenReader.read(it) }
+                    now != null && !now.passwordField && now.signature != sig
+                }
+                if (!ui.waitForUser(PASSWORD_MESSAGE, done)) return ui.finish("Okay, stopped.")
+                ui.status("Thanks, continuing…")
+                continue
+            }
             if (prefs.isAgentBlocked(snap.pkg, appLabelOf(snap.pkg))) {
                 return ui.finish("Stopped: you've set this app as off-limits.")
             }
@@ -285,7 +327,7 @@ class ScreenAgent(
 
             step++
             ui.status("Step $step: reading the screen…")
-            val (questions, labels) = buildQuestions(snap, spans)
+            val (questions, labels) = buildQuestions(snap, spans, allowWait = jevWaits < MAX_JEV_WAITS)
             val state = JSONObject()
                 .put("goal", goal)
                 .put("app", appLabelOf(snap.pkg))
@@ -317,12 +359,21 @@ class ScreenAgent(
             when (choice) {
                 "done" -> return ui.finish("Done.")
                 "wait" -> {
-                    // Jev says the screen is still loading. Doesn't count as a step.
+                    // Jev says the screen is still loading. Doesn't count as a step; after
+                    // MAX_JEV_WAITS the option is withdrawn so a static screen can't stall the run.
                     step--
                     sameCount = 0
-                    if (++jevWaits > MAX_JEV_WAITS) return ui.finish("The app didn't finish loading.")
+                    jevWaits++
                     ui.status("Waiting for the app to load…")
                     Thread.sleep(2000)
+                }
+                "needs_you" -> {
+                    step--
+                    sameCount = 0
+                    val sig = snap.signature
+                    val changed = { svc.rootInActiveWindow?.let { ScreenReader.read(it).signature != sig } == true }
+                    if (!ui.waitForUser(SIGN_IN_MESSAGE, changed)) return ui.finish("Okay, stopped.")
+                    ui.status("Thanks, continuing…")
                 }
                 "stuck" -> {
                     // Give the screen one more chance before giving up: it may still be loading.
@@ -387,6 +438,7 @@ class ScreenAgent(
     private fun buildQuestions(
         snap: ScreenSnapshot,
         spans: Map<String, String>,
+        allowWait: Boolean,
     ): Pair<JSONObject, Map<String, String>> {
         val labels = LinkedHashMap<String, String>()
         snap.elements.forEach { labels[it.key] = (if (it.editable) "Type into " else "Tap ") + it.description }
@@ -397,7 +449,12 @@ class ScreenAgent(
         if (Build.VERSION.SDK_INT >= 30 && snap.inputForSubmit != null) {
             labels["submit"] = "Press Enter / Search on the keyboard to submit the text already typed"
         }
-        labels["wait"] = "Wait: the screen is still loading, blank, or showing a splash or loading screen"
+        if (allowWait) {
+            labels["wait"] = "Wait: the app is visibly still loading (a loading message, spinner or splash screen " +
+                "and nothing usable yet). Not for maps, videos, players or other screens that are already showing content"
+        }
+        labels["needs_you"] = "The user must do the next step personally: sign in, enter a password or PIN, verify " +
+            "with fingerprint or face, solve a CAPTCHA, or approve on another device"
         labels["back"] = "Go back to the previous screen"
         labels["done"] = "Nothing to do: the goal is already achieved on this screen"
         labels["stuck"] = "The goal can't be achieved from this screen"
@@ -466,7 +523,11 @@ class ScreenAgent(
                 // Real content + (unchanged, or we've given it a moment: some screens animate forever).
                 val stable = prevSig == snap.signature
                 val gaveItAMoment = SystemClock.elapsedRealtime() - started > 1200
-                if (!snap.looksNotReady && (stable || gaveItAMoment)) return snap
+                val elapsed = SystemClock.elapsedRealtime() - started
+                // Blank: keep waiting. "Looks loading": wait a little, then let Jev judge (sparse screens
+                // like maps can look like loading screens).
+                val readyEnough = !snap.isBlank && (!snap.looksLoading || elapsed > SOFT_WAIT_MS)
+                if (readyEnough && (stable || gaveItAMoment)) return snap
                 prevSig = snap.signature
             }
             if (SystemClock.elapsedRealtime() >= until) {
@@ -480,6 +541,34 @@ class ScreenAgent(
             Thread.sleep(400)
         }
         return null
+    }
+
+    /**
+     * A fingerprint/face/credential prompt from the system, or the phone is locked.
+     * BiometricPrompt and the lock screen are drawn by System UI, a separate window from the app.
+     */
+    private fun authPromptVisible(): Boolean {
+        val km = svc.getSystemService(KeyguardManager::class.java)
+        if (km != null && km.isKeyguardLocked) return true
+        val windows = try { svc.windows } catch (e: Exception) { emptyList() }
+        for (w in windows) {
+            val root = w.root ?: continue
+            val pkg = root.packageName?.toString() ?: continue
+            if (pkg != "com.android.systemui" && !pkg.contains("biometric")) continue
+            if (hasAuthText(root, 0)) return true
+        }
+        return false
+    }
+
+    private fun hasAuthText(n: AccessibilityNodeInfo, depth: Int): Boolean {
+        if (depth > 25) return false
+        val t = (n.text?.toString() ?: "") + " " + (n.contentDescription?.toString() ?: "")
+        if (AUTH_WORDS.containsMatchIn(t)) return true
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            if (hasAuthText(c, depth + 1)) return true
+        }
+        return false
     }
 
     /** Wait until the app stops changing the screen (or 2.5 s). */
@@ -501,7 +590,20 @@ class ScreenAgent(
 
     companion object {
         const val MAX_STEPS = 15
-        private const val MAX_JEV_WAITS = 5
+        private const val MAX_JEV_WAITS = 2
+        private const val SOFT_WAIT_MS = 4_000L
+        private const val AUTH_MESSAGE =
+            "Your turn: verify it's you (fingerprint, face, PIN or unlock). I'll continue when you're done."
+        private const val PASSWORD_MESSAGE =
+            "Your turn: this needs your password or PIN. Enter it yourself and I'll continue."
+        private const val SIGN_IN_MESSAGE =
+            "Your turn: this step needs you (sign in, verify, or approve). Tap Continue when you're done."
+        private val AUTH_WORDS = Regex(
+            "fingerprint|face unlock|use your face|verify it.s you|confirm it.s you|biometric|" +
+                "touch the (fingerprint )?sensor|enter (your )?(pin|password|pattern)|use (pin|password|pattern)|" +
+                "draw (your )?pattern",
+            RegexOption.IGNORE_CASE,
+        )
         private const val READY_TIMEOUT_MS = 12_000L
         private const val ASK_BELOW = 0.35
         private const val RISK_AT = 0.25

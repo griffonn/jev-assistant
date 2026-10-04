@@ -136,6 +136,33 @@ class JevAccessibilityService : AccessibilityService() {
             }
         }
 
+        override fun waitForUser(message: String, isDone: () -> Boolean): Boolean {
+            val latch = CountDownLatch(1)
+            pendingAnswer = null
+            pendingLatch = latch
+            main.post {
+                if (overlay == null) showOverlay()
+                statusView?.text = message
+                setButtons(listOf("continue" to "Continue", "stop" to "Stop"))
+            }
+            val until = SystemClock.elapsedRealtime() + 3 * 60_000
+            var doneStreak = 0
+            try {
+                while (SystemClock.elapsedRealtime() < until) {
+                    if (latch.await(500, TimeUnit.MILLISECONDS)) {
+                        return pendingAnswer == "continue" && agent != null
+                    }
+                    if (agent == null) return false // Stop pressed
+                    doneStreak = if (isDone()) doneStreak + 1 else 0
+                    if (doneStreak >= 2) return true // prompt gone: carry on by ourselves
+                }
+                return false
+            } finally {
+                pendingLatch = null
+                main.post { setButtons(emptyList()) }
+            }
+        }
+
         private fun ask(question: String, options: List<Pair<String, String>>): String? {
             val latch = CountDownLatch(1)
             pendingAnswer = null
