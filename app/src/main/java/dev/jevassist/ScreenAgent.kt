@@ -27,7 +27,25 @@ class ScreenSnapshot(
     val scrollable: AccessibilityNodeInfo?,
     val inputForSubmit: AccessibilityNodeInfo?,
     val signature: Int,
-)
+    /** A spinner / progress bar / skeleton loader is visible. */
+    val progressVisible: Boolean,
+) {
+    private val loadingText = Regex(
+        "^(loading|please wait|connecting|just a moment|one moment|signing in|refreshing)\\b",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** Heuristic: the app hasn't shown real content yet (blank, splash, or spinner with little else). */
+    val looksNotReady: Boolean
+        get() {
+            if (elements.isEmpty()) return true
+            if (elements.size + texts.size < 3) return true
+            val few = elements.size <= 6
+            if (few && progressVisible) return true
+            if (few && texts.any { loadingText.containsMatchIn(it) }) return true
+            return false
+        }
+}
 
 /**
  * Turns the current screen into text. Jev is text-only, so instead of a screenshot it gets
@@ -45,11 +63,16 @@ object ScreenReader {
         var scrollArea = 0
         var focusedInput: AccessibilityNodeInfo? = null
         var filledInput: AccessibilityNodeInfo? = null
+        var progress = false
 
         fun visit(n: AccessibilityNodeInfo, depth: Int) {
             if (depth > 45 || !n.isVisibleToUser) return
             val own = ownLabel(n)
             if (own.isNotEmpty() && !n.isPassword) texts.add(own.take(120))
+            val cls = n.className?.toString() ?: ""
+            if (cls.contains("ProgressBar") || cls.contains("ProgressIndicator") || cls.contains("Shimmer")) {
+                progress = true
+            }
 
             if (n.isScrollable) {
                 val r = Rect(); n.getBoundsInScreen(r)
@@ -80,6 +103,7 @@ object ScreenReader {
             scrollable = scroll,
             inputForSubmit = focusedInput ?: filledInput,
             signature = (textList.joinToString("|") + elements.size).hashCode(),
+            progressVisible = progress,
         )
     }
 
@@ -210,23 +234,22 @@ class ScreenAgent(
 
         var lastSig = 0
         var sameCount = 0
-        for (step in 1..MAX_STEPS) {
+        var step = 0
+        var jevWaits = 0
+        var stuckRecheckSig = 0
+        var stuckRechecks = 0
+        while (step < MAX_STEPS) {
             if (cancelled) return
             waitForSettle()
-            val root = svc.rootInActiveWindow
-            val rootPkg = root?.packageName?.toString()
-            if (root == null || rootPkg == null || rootPkg == svc.packageName) {
-                Thread.sleep(300)
-                continue
-            }
-            if (prefs.isAgentBlocked(rootPkg, appLabelOf(rootPkg))) {
+            val snap = waitUntilReady() ?: return
+            if (prefs.isAgentBlocked(snap.pkg, appLabelOf(snap.pkg))) {
                 return ui.finish("Stopped: you've set this app as off-limits.")
             }
-            val snap = ScreenReader.read(root)
             sameCount = if (snap.signature == lastSig) sameCount + 1 else 0
             lastSig = snap.signature
             if (sameCount >= 3) return ui.finish("I'm stuck: the screen isn't changing.")
 
+            step++
             ui.status("Step $step: reading the screen…")
             val (questions, labels) = buildQuestions(snap, spans)
             val state = JSONObject()
@@ -249,7 +272,27 @@ class ScreenAgent(
 
             when (choice) {
                 "done" -> return ui.finish("Done.")
-                "stuck" -> return ui.finish("I couldn't find a way to do that from here.")
+                "wait" -> {
+                    // Jev says the screen is still loading. Doesn't count as a step.
+                    step--
+                    sameCount = 0
+                    if (++jevWaits > MAX_JEV_WAITS) return ui.finish("The app didn't finish loading.")
+                    ui.status("Waiting for the app to load…")
+                    Thread.sleep(2000)
+                }
+                "stuck" -> {
+                    // Give the screen one more chance before giving up: it may still be loading.
+                    if (stuckRecheckSig != snap.signature && stuckRechecks < 2) {
+                        stuckRecheckSig = snap.signature
+                        stuckRechecks++
+                        step--
+                        sameCount = 0
+                        ui.status("Taking another look…")
+                        Thread.sleep(3000)
+                    } else {
+                        return ui.finish("I couldn't find a way to do that from here.")
+                    }
+                }
                 "back" -> {
                     svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
                     history.add("Went back")
@@ -310,6 +353,7 @@ class ScreenAgent(
         if (Build.VERSION.SDK_INT >= 30 && snap.inputForSubmit != null) {
             labels["submit"] = "Press Enter / Search on the keyboard to submit the text already typed"
         }
+        labels["wait"] = "Wait: the screen is still loading, blank, or showing a splash or loading screen"
         labels["back"] = "Go back to the previous screen"
         labels["done"] = "Nothing to do: the goal is already achieved on this screen"
         labels["stuck"] = "The goal can't be achieved from this screen"
@@ -359,6 +403,41 @@ class ScreenAgent(
         svc.dispatchGesture(gesture, null, null)
     }
 
+    /**
+     * Reads the screen, waiting (up to 12 s) while it looks not ready: no window yet, our own
+     * overlay, blank, a spinner with little else, or still changing. Returns null if cancelled.
+     */
+    private fun waitUntilReady(): ScreenSnapshot? {
+        val started = SystemClock.elapsedRealtime()
+        val until = started + READY_TIMEOUT_MS
+        var prevSig: Int? = null
+        var shownWaiting = false
+        var last: ScreenSnapshot? = null
+        while (!cancelled) {
+            val root = svc.rootInActiveWindow
+            val rootPkg = root?.packageName?.toString()
+            if (root != null && rootPkg != null && rootPkg != svc.packageName) {
+                val snap = ScreenReader.read(root)
+                last = snap
+                // Real content + (unchanged, or we've given it a moment: some screens animate forever).
+                val stable = prevSig == snap.signature
+                val gaveItAMoment = SystemClock.elapsedRealtime() - started > 1200
+                if (!snap.looksNotReady && (stable || gaveItAMoment)) return snap
+                prevSig = snap.signature
+            }
+            if (SystemClock.elapsedRealtime() >= until) {
+                // Waited long enough: let Jev judge whatever is there (it can still choose "wait").
+                return last ?: return null.also { ui.finish("The app didn't open.") }
+            }
+            if (!shownWaiting && (last == null || last.looksNotReady)) {
+                ui.status("Waiting for the app to load…")
+                shownWaiting = true
+            }
+            Thread.sleep(400)
+        }
+        return null
+    }
+
     /** Wait until the app stops changing the screen (or 2.5 s). */
     private fun waitForSettle() {
         Thread.sleep(350)
@@ -378,6 +457,8 @@ class ScreenAgent(
 
     companion object {
         const val MAX_STEPS = 15
+        private const val MAX_JEV_WAITS = 5
+        private const val READY_TIMEOUT_MS = 12_000L
         private const val ASK_BELOW = 0.35
         private const val RISK_AT = 0.25
         private val RISK_WORDS = Regex(
